@@ -401,6 +401,7 @@ def build_holistor_import(df_mov: pd.DataFrame) -> pd.DataFrame:
         "Exento / No Gravado": 0.0,
         "Cód p/R": "",
         "Percepción / Retención": 0.0,
+        "Total": 0.0,
         "Observación": f"Cuenta {cuenta}",
     }
 
@@ -458,7 +459,18 @@ def build_holistor_import(df_mov: pd.DataFrame) -> pd.DataFrame:
     if not rows:
         rows.append(base.copy())
 
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    for col in ["Neto", "IVA", "Exento / No Gravado", "Percepción / Retención"]:
+        if col not in out.columns:
+            out[col] = 0.0
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
+    out["Total"] = (
+        out["Neto"]
+        + out["IVA"]
+        + out["Exento / No Gravado"]
+        + out["Percepción / Retención"]
+    ).round(2)
+    return out
 
 
 def build_credit_detail(df_mov: pd.DataFrame) -> pd.DataFrame:
