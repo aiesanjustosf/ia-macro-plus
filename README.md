@@ -13,6 +13,7 @@ App independiente en Streamlit para procesar PDFs de **Banco Macro – Últimos 
 - Descarga de PDF de resumen operativo.
 - Descarga de Excel general.
 - Descarga de Excel Holistor.
+- Separación automática de gastos bancarios al 21% y al 10,5%.
 - Descarga de Excel con detalle de créditos, préstamos y pago de cuotas.
 
 ## Conciliación bancaria
@@ -31,7 +32,8 @@ Ajustes incluidos:
 
 - Columna `Cód` antes de `Exento / No Gravado`.
 - `Cód = 584`.
-- Código de neto: `506`.
+- Código de neto gasto al 21%: `506`.
+- Código de neto gasto al 10,5%: `604`.
 - SIRCREB: `SIRC`.
 
 ## Instalación
