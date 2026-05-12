@@ -125,6 +125,94 @@ def _fmt_date(value) -> str:
     return str(value)
 
 
+
+def build_bank_reconciliation(df_mov: pd.DataFrame) -> pd.DataFrame:
+    """
+    Conciliación bancaria para PDFs de Últimos Movimientos.
+
+    Banco Macro no informa saldo anterior en este formato. Se reconstruye así:
+    saldo anterior calculado = saldo del primer movimiento cronológico - importe del primer movimiento cronológico.
+    Luego se recalcula el saldo acumulado y se compara contra el saldo final informado.
+    """
+    if df_mov.empty:
+        return pd.DataFrame()
+
+    group_cols = []
+    if "archivo" in df_mov.columns:
+        group_cols.append("archivo")
+    if "cuenta" in df_mov.columns:
+        group_cols.append("cuenta")
+
+    if not group_cols:
+        grouped = [("PDF", df_mov.copy())]
+    else:
+        grouped = df_mov.groupby(group_cols, dropna=False, sort=False)
+
+    rows = []
+    for key, group in grouped:
+        g = group.copy()
+        if "orden_cronologico" in g.columns:
+            g = g.sort_values("orden_cronologico", ascending=True)
+        elif "orden_pdf" in g.columns:
+            g = g.sort_values("orden_pdf", ascending=False)
+        else:
+            g = g.sort_values("fecha", ascending=True)
+
+        if g.empty:
+            continue
+
+        first = g.iloc[0]
+        last = g.iloc[-1]
+        saldo_anterior = round(float(first["saldo"]) - float(first["importe"]), 2)
+        total_creditos = round(g.loc[g["importe"] > 0, "importe"].sum(), 2)
+        total_debitos = round(-g.loc[g["importe"] < 0, "importe"].sum(), 2)
+        neto = round(g["importe"].sum(), 2)
+        saldo_final_calculado = round(saldo_anterior + neto, 2)
+        saldo_final_informado = round(float(last["saldo"]), 2)
+        diferencia = round(saldo_final_calculado - saldo_final_informado, 2)
+
+        if isinstance(key, tuple):
+            key_values = list(key)
+        else:
+            key_values = [key]
+
+        archivo = ""
+        cuenta = "s/n"
+        if "archivo" in group_cols and "cuenta" in group_cols:
+            archivo, cuenta = key_values[0], key_values[1]
+        elif "archivo" in group_cols:
+            archivo = key_values[0]
+            cuenta = str(g["cuenta"].iloc[0]) if "cuenta" in g.columns else "s/n"
+        elif "cuenta" in group_cols:
+            cuenta = key_values[0]
+            archivo = str(g["archivo"].iloc[0]) if "archivo" in g.columns else ""
+
+        rows.append({
+            "Archivo": archivo,
+            "Cuenta": cuenta,
+            "Desde": _fmt_date(g["fecha"].min()) if "fecha" in g.columns else "",
+            "Hasta": _fmt_date(g["fecha"].max()) if "fecha" in g.columns else "",
+            "Movimientos": len(g),
+            "Saldo anterior calculado": saldo_anterior,
+            "Créditos": total_creditos,
+            "Débitos": total_debitos,
+            "Neto movimientos": neto,
+            "Saldo final calculado": saldo_final_calculado,
+            "Saldo final informado": saldo_final_informado,
+            "Diferencia": diferencia,
+            "Estado": "Conciliado" if abs(diferencia) < 0.01 else "Diferencia",
+        })
+
+    out = pd.DataFrame(rows)
+    for col in [
+        "Saldo anterior calculado", "Créditos", "Débitos", "Neto movimientos",
+        "Saldo final calculado", "Saldo final informado", "Diferencia"
+    ]:
+        if col in out.columns:
+            out[f"{col} formateado"] = out[col].apply(fmt_money)
+    return out
+
+
 def build_holistor_import(df_mov: pd.DataFrame) -> pd.DataFrame:
     """
     Genera una planilla de importación orientada a Holistor Compras.
@@ -160,6 +248,7 @@ def build_holistor_import(df_mov: pd.DataFrame) -> pd.DataFrame:
         "Neto": 0.0,
         "Alícuota IVA": "0,000",
         "IVA": 0.0,
+        "Cód": "584",
         "Exento / No Gravado": 0.0,
         "Cód p/R": "",
         "Percepción / Retención": 0.0,
@@ -172,7 +261,7 @@ def build_holistor_import(df_mov: pd.DataFrame) -> pd.DataFrame:
         row = base.copy()
         row.update({
             "Detalle": "Gastos / Comisiones bancarias",
-            "Cód. Neto": "524",
+            "Cód. Neto": "506",
             "Neto": gasto_comisiones,
             "Alícuota IVA": "21,000" if iva_basico else "0,000",
             "IVA": iva_basico,
@@ -183,7 +272,7 @@ def build_holistor_import(df_mov: pd.DataFrame) -> pd.DataFrame:
         row = base.copy()
         row.update({
             "Detalle": "Ley 25.413 / Débitos y Créditos",
-            "Cód. Neto": "524",
+            "Cód. Neto": "506",
             "Exento / No Gravado": ley_25413,
         })
         rows.append(row)
@@ -192,7 +281,7 @@ def build_holistor_import(df_mov: pd.DataFrame) -> pd.DataFrame:
         row = base.copy()
         row.update({
             "Detalle": "SIRCREB / IIBB Santa Fe",
-            "Cód p/R": "P006",
+            "Cód p/R": "SIRC",
             "Percepción / Retención": sircreb,
         })
         rows.append(row)
@@ -212,7 +301,7 @@ def build_holistor_import(df_mov: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def make_excel(df_mov: pd.DataFrame, df_resumen: pd.DataFrame) -> bytes:
+def make_excel(df_mov: pd.DataFrame, df_resumen: pd.DataFrame, df_conciliacion: pd.DataFrame | None = None) -> bytes:
     output = io.BytesIO()
 
     df_mov_export = df_mov.copy()
@@ -221,6 +310,8 @@ def make_excel(df_mov: pd.DataFrame, df_resumen: pd.DataFrame) -> bytes:
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_resumen.to_excel(writer, sheet_name="Resumen operativo", index=False)
+        if df_conciliacion is not None and not df_conciliacion.empty:
+            df_conciliacion.to_excel(writer, sheet_name="Conciliacion bancaria", index=False)
         df_mov_export.to_excel(writer, sheet_name="Movimientos", index=False)
 
         for ws in writer.book.worksheets:
@@ -246,7 +337,7 @@ def make_holistor_excel(df_mov: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
-def make_operational_summary_pdf(df_mov: pd.DataFrame, df_resumen: pd.DataFrame, logo_path=None) -> bytes:
+def make_operational_summary_pdf(df_mov: pd.DataFrame, df_resumen: pd.DataFrame, df_conciliacion: pd.DataFrame | None = None, logo_path=None) -> bytes:
     output = io.BytesIO()
     doc = SimpleDocTemplate(
         output,
@@ -293,6 +384,33 @@ def make_operational_summary_pdf(df_mov: pd.DataFrame, df_resumen: pd.DataFrame,
     ]))
     story.append(table_meta)
     story.append(Spacer(1, 0.35 * cm))
+
+    if df_conciliacion is not None and not df_conciliacion.empty:
+        story.append(Paragraph("Conciliación bancaria", styles["Heading2"]))
+        conc_data = [["Cuenta", "Saldo anterior", "Créditos", "Débitos", "Saldo final", "Diferencia", "Estado"]]
+        for _, row in df_conciliacion.iterrows():
+            conc_data.append([
+                str(row.get("Cuenta", "")),
+                f"$ {fmt_money(row.get('Saldo anterior calculado', 0))}",
+                f"$ {fmt_money(row.get('Créditos', 0))}",
+                f"$ {fmt_money(row.get('Débitos', 0))}",
+                f"$ {fmt_money(row.get('Saldo final informado', 0))}",
+                f"$ {fmt_money(row.get('Diferencia', 0))}",
+                str(row.get("Estado", "")),
+            ])
+        table_conc = Table(conc_data, colWidths=[3.2 * cm, 2.7 * cm, 2.4 * cm, 2.4 * cm, 2.7 * cm, 2.2 * cm, 2.0 * cm])
+        table_conc.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E78")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 0), (-1, -1), 7),
+            ("ALIGN", (1, 1), (5, -1), "RIGHT"),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#CCCCCC")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F7F7")]),
+        ]))
+        story.append(table_conc)
+        story.append(Spacer(1, 0.35 * cm))
 
     story.append(Paragraph("Resumen operativo", styles["Heading2"]))
     data = [["Concepto", "Importe"]]

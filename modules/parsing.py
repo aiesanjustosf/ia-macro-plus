@@ -82,6 +82,7 @@ def macro_ultimos_movimientos_extract(text: str) -> dict:
     )
 
     rows = []
+    orden_pdf = 0
     for ln in lines:
         match = pattern.match(ln)
         if not match:
@@ -93,6 +94,7 @@ def macro_ultimos_movimientos_extract(text: str) -> dict:
 
         rows.append(
             {
+                "orden_pdf": orden_pdf,
                 "fecha": pd.to_datetime(match.group("fecha"), format="%d/%m/%Y", errors="coerce"),
                 "referencia": match.group("referencia"),
                 "causal": match.group("causal"),
@@ -103,10 +105,14 @@ def macro_ultimos_movimientos_extract(text: str) -> dict:
                 "categoria": _macro_classify_movement(concepto),
             }
         )
+        orden_pdf += 1
 
     df = pd.DataFrame(rows)
     if not df.empty:
-        df = df.sort_values(["fecha", "referencia"], ascending=[True, True]).reset_index(drop=True)
+        # El PDF de Últimos Movimientos viene normalmente en orden descendente.
+        # Conservamos orden_pdf para la conciliación y dejamos la vista en orden cronológico.
+        df = df.sort_values(["orden_pdf"], ascending=[False]).reset_index(drop=True)
+        df["orden_cronologico"] = range(len(df))
 
     return {
         "cuenta": _extract_account(lines),
