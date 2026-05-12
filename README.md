@@ -1,45 +1,46 @@
-# IA Resumen Bancario – Banco Macro
+# IA Resumen Bancario – Banco Macro | Últimos Movimientos
 
-App independiente en Streamlit para procesar PDFs de **Banco Macro - Últimos Movimientos**.
+App independiente en Streamlit para procesar PDFs de **Banco Macro – Últimos Movimientos**.
 
 ## Funciones
 
 - Carga de uno o varios PDFs.
-- Detección de cuenta, empresa y movimientos.
-- Resumen operativo por conceptos.
-- Conciliación bancaria:
-  - reconstruye el saldo anterior porque el PDF no lo informa;
-  - calcula `saldo anterior = saldo del primer movimiento cronológico - importe del primer movimiento`;
-  - concilia contra el saldo final informado por el último movimiento cronológico.
+- Detección de cuenta, empresa, período y movimientos.
+- Resumen operativo.
+- Conciliación bancaria.
+- Reconstrucción de saldo anterior aunque el PDF no lo informe.
+- Cálculo correcto tomando como inicio el movimiento con **fecha más antigua** y como cierre el movimiento con **fecha más reciente**.
 - Descarga de PDF de resumen operativo.
-- Descarga de Excel general con hojas:
-  - Resumen operativo;
-  - Conciliación bancaria;
-  - Movimientos.
+- Descarga de Excel general.
 - Descarga de Excel Holistor.
+- Descarga de Excel con detalle de créditos, préstamos y pago de cuotas.
 
-## Holistor
+## Conciliación bancaria
+
+Banco Macro no informa saldo anterior en este formato. La app lo calcula así:
+
+```text
+Saldo anterior calculado = saldo del primer movimiento cronológico - importe del primer movimiento cronológico
+```
+
+Para evitar errores cuando el PDF viene listado de más nuevo a más viejo, la app reconstruye el orden por cadena de saldos y, como respaldo, toma la fecha más antigua como inicio y la fecha más reciente como cierre.
+
+## Excel Holistor
 
 Ajustes incluidos:
 
-- Columna **Cód** agregada antes de **Exento / No Gravado**.
-- La columna **Cód** se completa con `584`.
-- Código neto actualizado de `524` a `506`.
-- Código de SIRCREB actualizado de `P006` a `SIRC`.
+- Columna `Cód` antes de `Exento / No Gravado`.
+- `Cód = 584`.
+- Código de neto: `506`.
+- SIRCREB: `SIRC`.
 
-## Instalación local
+## Instalación
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Deploy en Streamlit Cloud
-
-1. Subir el repositorio a GitHub.
-2. Crear una app nueva en Streamlit Cloud.
-3. Seleccionar `app.py` como archivo principal.
-
----
+## Uso interno
 
 Herramienta para uso interno AIE San Justo.

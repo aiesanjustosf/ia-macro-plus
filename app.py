@@ -9,9 +9,11 @@ from modules.parsing import macro_ultimos_movimientos_extract
 from modules.reports import (
     build_operational_summary,
     build_bank_reconciliation,
+    build_credit_detail,
     fmt_money,
     make_excel,
     make_holistor_excel,
+    make_credit_detail_excel,
     make_operational_summary_pdf,
 )
 
@@ -160,6 +162,19 @@ conc_cols = [
 conc_cols = [c for c in conc_cols if c in conciliacion.columns]
 st.dataframe(conciliacion[conc_cols], use_container_width=True, hide_index=True)
 
+st.subheader("Detalle de créditos / cuotas")
+detalle_creditos = build_credit_detail(df)
+if detalle_creditos.empty:
+    st.info("No se detectaron movimientos vinculados a créditos, préstamos o pago de cuotas.")
+else:
+    dc_show = detalle_creditos.copy()
+    if "fecha" in dc_show.columns:
+        dc_show["fecha"] = dc_show["fecha"].dt.strftime("%d/%m/%Y")
+    for col in ["importe", "saldo"]:
+        if col in dc_show.columns:
+            dc_show[col] = dc_show[col].apply(fmt_money)
+    st.dataframe(dc_show, use_container_width=True, hide_index=True)
+
 with st.expander("Ver movimientos detectados", expanded=False):
     df_show = df.copy()
     df_show["fecha"] = df_show["fecha"].dt.strftime("%d/%m/%Y")
@@ -185,10 +200,11 @@ if df["cuenta"].nunique() == 1:
 
 excel_bytes = make_excel(df, resumen, conciliacion)
 holistor_bytes = make_holistor_excel(df)
+credit_detail_bytes = make_credit_detail_excel(df)
 pdf_bytes = make_operational_summary_pdf(df, resumen, conciliacion, logo_path=LOGO if LOGO.exists() else None)
 
 st.subheader("Descargas")
-d1, d2, d3 = st.columns(3)
+d1, d2, d3, d4 = st.columns(4)
 
 d1.download_button(
     "Descargar PDF resumen operativo",
@@ -210,6 +226,14 @@ d3.download_button(
     "Descargar Excel Holistor",
     data=holistor_bytes,
     file_name=f"{suffix}_holistor.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    use_container_width=True,
+)
+
+d4.download_button(
+    "Descargar detalle créditos",
+    data=credit_detail_bytes,
+    file_name=f"{suffix}_detalle_creditos.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True,
 )
