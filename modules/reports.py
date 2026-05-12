@@ -58,17 +58,86 @@ def build_masks(df: pd.DataFrame) -> dict[str, pd.Series]:
     }
 
 
+def build_expense_tax_breakdown(df: pd.DataFrame) -> dict[str, float]:
+    """
+    Separa gastos bancarios por alícuota real según el IVA BÁSICO asociado.
+
+    Regla:
+    - Se agrupa por archivo/cuenta/fecha/referencia/causal cuando esas columnas existen.
+    - Dentro del mismo grupo, el movimiento base es COMISIÓN / MANTENIMIENTO / INTER.ADEL.
+    - El IVA BÁSICO asociado define la alícuota:
+        * IVA / Neto ≈ 21%   -> Gasto al 21%, código Holistor 506.
+        * IVA / Neto ≈ 10,5% -> Gasto al 10,5%, código Holistor 604.
+    - Si hay gasto sin IVA BÁSICO asociado, se lo conserva como gasto al 21% con IVA 0,
+      para no perder ningún gasto bancario.
+    """
+    if df.empty:
+        return {"neto_21": 0.0, "iva_21": 0.0, "neto_105": 0.0, "iva_105": 0.0}
+
+    d = df.copy()
+    concepto = d["concepto_norm"].fillna("")
+
+    is_iva_basico = concepto.str.contains("DEBITO FISCAL IVA BASICO", na=False)
+    is_iva_percepcion = concepto.str.contains("DEBITO FISCAL IVA PERCEPCION", na=False)
+    is_base_gasto = concepto.str.contains(
+        r"COMISION|MANTENIMIENTO|INTER\.ADEL|INTER ADEL",
+        regex=True,
+        na=False,
+    ) & ~is_iva_basico & ~is_iva_percepcion
+
+    d["_is_base_gasto"] = is_base_gasto
+    d["_is_iva_basico"] = is_iva_basico
+
+    group_cols = [c for c in ["archivo", "cuenta", "fecha", "referencia", "causal"] if c in d.columns]
+    if not group_cols:
+        group_cols = ["referencia", "causal"] if {"referencia", "causal"}.issubset(d.columns) else []
+
+    neto_21 = iva_21 = neto_105 = iva_105 = 0.0
+
+    if group_cols:
+        grouped = d.groupby(group_cols, dropna=False, sort=False)
+    else:
+        grouped = [("PDF", d)]
+
+    for _, g in grouped:
+        base = round(-g.loc[g["_is_base_gasto"], "importe"].sum(), 2)
+        iva = round(-g.loc[g["_is_iva_basico"], "importe"].sum(), 2)
+
+        if round(base, 2) == 0 and round(iva, 2) == 0:
+            continue
+
+        rate = abs(iva / base) if base else 0.0
+
+        if iva and 0.09 <= rate <= 0.12:
+            neto_105 += base
+            iva_105 += iva
+        else:
+            # Por defecto 21%: comisiones, mantenimiento y gastos sin IVA asociado.
+            neto_21 += base
+            iva_21 += iva
+
+    return {
+        "neto_21": round(neto_21, 2),
+        "iva_21": round(iva_21, 2),
+        "neto_105": round(neto_105, 2),
+        "iva_105": round(iva_105, 2),
+    }
+
+
 def build_operational_summary(df: pd.DataFrame) -> pd.DataFrame:
     masks = build_masks(df)
+    gastos = build_expense_tax_breakdown(df)
 
     rows = [
+        {"Concepto": "Gasto al 21%", "Importe": gastos["neto_21"], "incluye_total": True},
+        {"Concepto": "IVA al 21%", "Importe": gastos["iva_21"], "incluye_total": True},
+        {"Concepto": "Gasto al 10,5%", "Importe": gastos["neto_105"], "incluye_total": True},
+        {"Concepto": "IVA al 10,5%", "Importe": gastos["iva_105"], "incluye_total": True},
+        {"Concepto": "IVA percepción", "Importe": _neto(df, masks["iva_percepcion"]), "incluye_total": True},
         {"Concepto": "Ley 25.413 / Débitos y Créditos - Neto", "Importe": _neto(df, masks["25413"]), "incluye_total": True},
         {"Concepto": "Ley 25.413 S/DB", "Importe": _neto(df, masks["25413_db"]), "incluye_total": False},
         {"Concepto": "Ley 25.413 S/CR", "Importe": _neto(df, masks["25413_cr"]), "incluye_total": False},
         {"Concepto": "SIRCREB / IIBB Santa Fe - Neto", "Importe": _neto(df, masks["sircreb"]), "incluye_total": True},
-        {"Concepto": "Gastos / Comisiones bancarias", "Importe": _neto(df, masks["comisiones"]), "incluye_total": True},
-        {"Concepto": "IVA básico sobre gastos bancarios", "Importe": _neto(df, masks["iva_basico"]), "incluye_total": True},
-        {"Concepto": "IVA percepción", "Importe": _neto(df, masks["iva_percepcion"]), "incluye_total": True},
         {"Concepto": "AFIP / ARCA", "Importe": _neto(df, masks["afip_arca"]), "incluye_total": True},
         {"Concepto": "Cheques", "Importe": _neto(df, masks["cheques"]), "incluye_total": True},
         {"Concepto": "Tarjetas", "Importe": _neto(df, masks["tarjetas"]), "incluye_total": True},
@@ -293,19 +362,22 @@ def build_bank_reconciliation(df_mov: pd.DataFrame) -> pd.DataFrame:
 def build_holistor_import(df_mov: pd.DataFrame) -> pd.DataFrame:
     """
     Genera una planilla de importación orientada a Holistor Compras.
-    Criterio usado:
+
+    Criterio:
     - Un comprobante RB del Banco Macro por cuenta/período.
-    - Gastos/comisiones como neto al 21% con IVA básico separado en la misma línea.
-    - Ley 25.413 y SIRCREB como conceptos no gravados/percepciones según corresponda.
+    - Gasto al 21%: Cód. Neto 506.
+    - Gasto al 10,5%: Cód. Neto 604.
+    - Columna Cód antes de Exento / No Gravado con valor 584.
+    - SIRCREB: Cód p/R SIRC.
     """
     masks = build_masks(df_mov)
+    gastos = build_expense_tax_breakdown(df_mov)
+
     fecha = df_mov["fecha"].max()
     fecha_txt = _fmt_date(fecha)
     cuenta = str(df_mov["cuenta"].iloc[0]) if "cuenta" in df_mov.columns and not df_mov.empty else "s/n"
     nro = f"{fecha.strftime('%Y%m%d') if hasattr(fecha, 'strftime') else '00000000'}{cuenta[-4:] if cuenta != 's/n' else '0000'}"
 
-    gasto_comisiones = round(_neto(df_mov, masks["comisiones"]), 2)
-    iva_basico = round(_neto(df_mov, masks["iva_basico"]), 2)
     iva_percepcion = round(_neto(df_mov, masks["iva_percepcion"]), 2)
     ley_25413 = round(_neto(df_mov, masks["25413"]), 2)
     sircreb = round(_neto(df_mov, masks["sircreb"]), 2)
@@ -334,14 +406,25 @@ def build_holistor_import(df_mov: pd.DataFrame) -> pd.DataFrame:
 
     rows = []
 
-    if gasto_comisiones or iva_basico:
+    if gastos["neto_21"] or gastos["iva_21"]:
         row = base.copy()
         row.update({
-            "Detalle": "Gastos / Comisiones bancarias",
+            "Detalle": "Gasto al 21% - Banco Macro",
             "Cód. Neto": "506",
-            "Neto": gasto_comisiones,
-            "Alícuota IVA": "21,000" if iva_basico else "0,000",
-            "IVA": iva_basico,
+            "Neto": gastos["neto_21"],
+            "Alícuota IVA": "21,000" if gastos["iva_21"] else "0,000",
+            "IVA": gastos["iva_21"],
+        })
+        rows.append(row)
+
+    if gastos["neto_105"] or gastos["iva_105"]:
+        row = base.copy()
+        row.update({
+            "Detalle": "Gasto al 10,5% - Banco Macro",
+            "Cód. Neto": "604",
+            "Neto": gastos["neto_105"],
+            "Alícuota IVA": "10,500" if gastos["iva_105"] else "0,000",
+            "IVA": gastos["iva_105"],
         })
         rows.append(row)
 
@@ -376,7 +459,6 @@ def build_holistor_import(df_mov: pd.DataFrame) -> pd.DataFrame:
         rows.append(base.copy())
 
     return pd.DataFrame(rows)
-
 
 
 def build_credit_detail(df_mov: pd.DataFrame) -> pd.DataFrame:
