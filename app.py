@@ -6,7 +6,13 @@ import streamlit as st
 
 from modules.extraction import text_from_pdf
 from modules.parsing import macro_ultimos_movimientos_extract
-from modules.reports import build_operational_summary, fmt_money, make_excel
+from modules.reports import (
+    build_operational_summary,
+    fmt_money,
+    make_excel,
+    make_holistor_excel,
+    make_operational_summary_pdf,
+)
 
 HERE = Path(__file__).parent
 LOGO = HERE / "assets" / "logo_aie.png"
@@ -15,8 +21,48 @@ FAVICON = HERE / "assets" / "favicon-aie.ico"
 st.set_page_config(
     page_title="IA Resumen Bancario – Banco Macro",
     page_icon=str(FAVICON) if FAVICON.exists() else None,
-    layout="centered",
+    layout="wide",
 )
+
+st.markdown(
+    """
+    <style>
+    .block-container {max-width: 1180px; padding-top: 2rem;}
+    .aie-metric-card {
+        border: 1px solid rgba(128,128,128,.25);
+        border-radius: 12px;
+        padding: 18px 20px;
+        min-height: 112px;
+        background: rgba(128,128,128,.06);
+    }
+    .aie-metric-label {
+        font-size: 0.92rem;
+        font-weight: 700;
+        margin-bottom: 10px;
+        opacity: .9;
+    }
+    .aie-metric-value {
+        font-size: clamp(1.45rem, 2.4vw, 2.15rem);
+        line-height: 1.15;
+        font-weight: 650;
+        white-space: nowrap;
+        overflow: visible;
+    }
+    div[data-testid="stDataFrame"] {width: 100%;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def metric_card(label: str, value: float) -> str:
+    return f"""
+    <div class=\"aie-metric-card\">
+        <div class=\"aie-metric-label\">{label}</div>
+        <div class=\"aie-metric-value\">$ {fmt_money(value)}</div>
+    </div>
+    """
+
 
 if LOGO.exists():
     st.image(str(LOGO), width=210)
@@ -42,7 +88,7 @@ for uploaded in uploaded_files:
     text = text_from_pdf(io.BytesIO(data)).strip()
 
     if not text:
-        file_results.append({"archivo": uploaded.name, "estado": "Sin texto detectable", "movimientos": 0})
+        file_results.append({"archivo": uploaded.name, "estado": "Sin texto detectable", "cuenta": "", "empresa": "", "movimientos": 0})
         continue
 
     result = macro_ultimos_movimientos_extract(text)
@@ -92,9 +138,9 @@ total_debitos = -df.loc[df["importe"] < 0, "importe"].sum()
 neto_movimientos = df["importe"].sum()
 
 col1, col2, col3 = st.columns(3)
-col1.metric("Créditos", f"$ {fmt_money(total_creditos)}")
-col2.metric("Débitos", f"$ {fmt_money(total_debitos)}")
-col3.metric("Neto", f"$ {fmt_money(neto_movimientos)}")
+col1.markdown(metric_card("Créditos", total_creditos), unsafe_allow_html=True)
+col2.markdown(metric_card("Débitos", total_debitos), unsafe_allow_html=True)
+col3.markdown(metric_card("Neto", neto_movimientos), unsafe_allow_html=True)
 
 st.subheader("Resumen operativo")
 resumen = build_operational_summary(df)
@@ -119,17 +165,39 @@ with st.expander("Ver movimientos detectados", expanded=False):
     ]
     st.dataframe(df_show[cols], use_container_width=True, hide_index=True)
 
-excel_bytes = make_excel(df, resumen)
-
 suffix = "macro_ultimos_movimientos"
 if df["cuenta"].nunique() == 1:
     suffix = f"macro_ultimos_movimientos_{str(df['cuenta'].iloc[0]).replace('/', '-') }"
 
-st.download_button(
-    "Descargar Excel",
+excel_bytes = make_excel(df, resumen)
+holistor_bytes = make_holistor_excel(df)
+pdf_bytes = make_operational_summary_pdf(df, resumen, logo_path=LOGO if LOGO.exists() else None)
+
+st.subheader("Descargas")
+d1, d2, d3 = st.columns(3)
+
+d1.download_button(
+    "Descargar PDF resumen operativo",
+    data=pdf_bytes,
+    file_name=f"{suffix}_resumen_operativo.pdf",
+    mime="application/pdf",
+    use_container_width=True,
+)
+
+d2.download_button(
+    "Descargar Excel general",
     data=excel_bytes,
     file_name=f"{suffix}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    use_container_width=True,
+)
+
+d3.download_button(
+    "Descargar Excel Holistor",
+    data=holistor_bytes,
+    file_name=f"{suffix}_holistor.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    use_container_width=True,
 )
 
 st.caption("Herramienta para uso interno AIE San Justo | Developer Alfonso Alderete")
