@@ -126,6 +126,89 @@ def _fmt_date(value) -> str:
 
 
 
+
+def _saldo_key(value) -> int:
+    """Clave entera en centavos para comparar saldos sin ruido de float."""
+    try:
+        return int(round(float(value) * 100))
+    except Exception:
+        return 0
+
+
+def _ordered_for_reconciliation(group: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ordena movimientos para conciliación.
+
+    Prioridad:
+    1) reconstrucción por cadena de saldos: saldo anterior + importe = saldo actual;
+    2) fallback por fecha más antigua a más reciente y, dentro del día, orden inverso al PDF
+       porque Macro suele listar de más nuevo a más viejo.
+
+    Esto evita tomar como saldo inicial el primer renglón del PDF cuando el archivo viene
+    descendente y ese primer registro corresponde al final del mes.
+    """
+    g = group.copy().reset_index(drop=False).rename(columns={"index": "_orig_index"})
+    if g.empty:
+        return g
+
+    g["_saldo_key"] = g["saldo"].apply(_saldo_key)
+    g["_prev_key"] = (g["saldo"] - g["importe"]).apply(_saldo_key)
+
+    current_keys = set(g["_saldo_key"].tolist())
+    start_candidates = g[~g["_prev_key"].isin(current_keys)].copy()
+
+    if not start_candidates.empty:
+        # Si hay más de un candidato, prioriza fecha más antigua.
+        sort_cols = ["fecha"] if "fecha" in start_candidates.columns else []
+        if "orden_pdf" in start_candidates.columns:
+            sort_cols.append("orden_pdf")
+            asc = [True, False]
+        else:
+            asc = [True] * len(sort_cols)
+        start = start_candidates.sort_values(sort_cols, ascending=asc).iloc[0] if sort_cols else start_candidates.iloc[0]
+
+        unused = set(g.index.tolist())
+        ordered_idx = []
+        current_idx = int(start.name)
+
+        while current_idx in unused:
+            ordered_idx.append(current_idx)
+            unused.remove(current_idx)
+            current_saldo = int(g.loc[current_idx, "_saldo_key"])
+            candidates = g[(g.index.isin(unused)) & (g["_prev_key"] == current_saldo)].copy()
+            if candidates.empty:
+                break
+            # Si hay empate, toma la fecha siguiente más antigua posible.
+            sort_cols = ["fecha"] if "fecha" in candidates.columns else []
+            if "orden_pdf" in candidates.columns:
+                sort_cols.append("orden_pdf")
+                asc = [True, False]
+            else:
+                asc = [True] * len(sort_cols)
+            nxt = candidates.sort_values(sort_cols, ascending=asc).iloc[0] if sort_cols else candidates.iloc[0]
+            current_idx = int(nxt.name)
+
+        if len(ordered_idx) == len(g):
+            return g.loc[ordered_idx].drop(columns=["_saldo_key", "_prev_key"], errors="ignore").reset_index(drop=True)
+
+    # Fallback explícito pedido: saldo inicial desde fecha más antigua y saldo final desde fecha más reciente.
+    sort_cols = []
+    ascending = []
+    if "fecha" in g.columns:
+        sort_cols.append("fecha")
+        ascending.append(True)
+    if "orden_pdf" in g.columns:
+        sort_cols.append("orden_pdf")
+        ascending.append(False)
+    elif "orden_cronologico" in g.columns:
+        sort_cols.append("orden_cronologico")
+        ascending.append(True)
+
+    if sort_cols:
+        g = g.sort_values(sort_cols, ascending=ascending)
+
+    return g.drop(columns=["_saldo_key", "_prev_key"], errors="ignore").reset_index(drop=True)
+
 def build_bank_reconciliation(df_mov: pd.DataFrame) -> pd.DataFrame:
     """
     Conciliación bancaria para PDFs de Últimos Movimientos.
@@ -150,13 +233,7 @@ def build_bank_reconciliation(df_mov: pd.DataFrame) -> pd.DataFrame:
 
     rows = []
     for key, group in grouped:
-        g = group.copy()
-        if "orden_cronologico" in g.columns:
-            g = g.sort_values("orden_cronologico", ascending=True)
-        elif "orden_pdf" in g.columns:
-            g = g.sort_values("orden_pdf", ascending=False)
-        else:
-            g = g.sort_values("fecha", ascending=True)
+        g = _ordered_for_reconciliation(group)
 
         if g.empty:
             continue
@@ -301,6 +378,83 @@ def build_holistor_import(df_mov: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+
+def build_credit_detail(df_mov: pd.DataFrame) -> pd.DataFrame:
+    """
+    Detalle de créditos/financiaciones detectadas.
+
+    Incluye acreditaciones vinculadas a créditos y débitos de pago de cuotas o financiación.
+    No toma todos los ingresos bancarios: solo conceptos con señales de crédito/préstamo/cuota.
+    """
+    if df_mov.empty:
+        return pd.DataFrame()
+
+    c = df_mov["concepto_norm"].fillna("")
+    mask = c.str.contains(
+        r"CREDIN|PRESTAMO|PRESTAMOS|CUOTA|CIRCULO CERRADO|ADEL\.CC|ACUERD|INTER\.ADEL|PAGO.*CUOTA|DEBITO.*PREST",
+        regex=True,
+        na=False,
+    )
+
+    out = df_mov.loc[mask].copy()
+    if out.empty:
+        return pd.DataFrame(columns=[
+            "archivo", "cuenta", "fecha", "referencia", "causal", "tipo_credito",
+            "concepto", "importe", "saldo", "signo", "observacion"
+        ])
+
+    def tipo(row):
+        concepto = str(row.get("concepto_norm", ""))
+        importe = float(row.get("importe", 0) or 0)
+        if importe > 0:
+            return "Acreditación de crédito"
+        if "INTER" in concepto or "ACUERD" in concepto or "ADEL.CC" in concepto:
+            return "Intereses / acuerdo"
+        return "Pago de cuota / débito"
+
+    out["tipo_credito"] = out.apply(tipo, axis=1)
+    out["signo"] = out["importe"].apply(lambda v: "Crédito" if float(v) > 0 else "Débito")
+    out["observacion"] = out["tipo_credito"]
+
+    if "fecha" in out.columns:
+        out = out.sort_values(["fecha", "orden_pdf"] if "orden_pdf" in out.columns else ["fecha"], ascending=[True, False] if "orden_pdf" in out.columns else [True])
+
+    cols = [
+        "archivo", "cuenta", "fecha", "referencia", "causal", "tipo_credito",
+        "concepto", "importe", "saldo", "signo", "observacion"
+    ]
+    cols = [col for col in cols if col in out.columns]
+    return out[cols].reset_index(drop=True)
+
+
+def make_credit_detail_excel(df_mov: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    detalle = build_credit_detail(df_mov)
+
+    export = detalle.copy()
+    if not export.empty and "fecha" in export.columns:
+        export["fecha"] = export["fecha"].dt.strftime("%d/%m/%Y")
+
+    resumen = pd.DataFrame()
+    if not detalle.empty:
+        resumen = detalle.groupby("tipo_credito", dropna=False).agg(
+            Cantidad=("importe", "count"),
+            Total=("importe", "sum"),
+        ).reset_index()
+        resumen.loc[len(resumen)] = {
+            "tipo_credito": "TOTAL",
+            "Cantidad": int(resumen["Cantidad"].sum()),
+            "Total": float(resumen["Total"].sum()),
+        }
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        resumen.to_excel(writer, sheet_name="Resumen creditos", index=False)
+        export.to_excel(writer, sheet_name="Detalle creditos", index=False)
+        for ws in writer.book.worksheets:
+            _style_sheet(ws)
+
+    return output.getvalue()
+
 def make_excel(df_mov: pd.DataFrame, df_resumen: pd.DataFrame, df_conciliacion: pd.DataFrame | None = None) -> bytes:
     output = io.BytesIO()
 
@@ -312,6 +466,12 @@ def make_excel(df_mov: pd.DataFrame, df_resumen: pd.DataFrame, df_conciliacion: 
         df_resumen.to_excel(writer, sheet_name="Resumen operativo", index=False)
         if df_conciliacion is not None and not df_conciliacion.empty:
             df_conciliacion.to_excel(writer, sheet_name="Conciliacion bancaria", index=False)
+        credit_detail = build_credit_detail(df_mov)
+        if not credit_detail.empty:
+            credit_export = credit_detail.copy()
+            if "fecha" in credit_export.columns:
+                credit_export["fecha"] = credit_export["fecha"].dt.strftime("%d/%m/%Y")
+            credit_export.to_excel(writer, sheet_name="Detalle creditos", index=False)
         df_mov_export.to_excel(writer, sheet_name="Movimientos", index=False)
 
         for ws in writer.book.worksheets:
