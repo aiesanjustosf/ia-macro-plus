@@ -1,17 +1,31 @@
 # IA Resumen Bancario – Banco Macro
 
-App Streamlit independiente para procesar PDFs de **Últimos Movimientos** de Banco Macro.
+App independiente en Streamlit para procesar PDFs de **Banco Macro - Últimos Movimientos**.
 
 ## Funciones
 
-- Procesa uno o varios PDFs.
-- Detecta cuenta, empresa, período y movimientos.
-- Muestra importes completos sin recortes visuales.
-- Genera resumen operativo.
-- Exporta:
-  - PDF de resumen operativo.
-  - Excel general con resumen y movimientos.
-  - Excel orientado a importación Holistor.
+- Carga de uno o varios PDFs.
+- Detección de cuenta, empresa y movimientos.
+- Resumen operativo por conceptos.
+- Conciliación bancaria:
+  - reconstruye el saldo anterior porque el PDF no lo informa;
+  - calcula `saldo anterior = saldo del primer movimiento cronológico - importe del primer movimiento`;
+  - concilia contra el saldo final informado por el último movimiento cronológico.
+- Descarga de PDF de resumen operativo.
+- Descarga de Excel general con hojas:
+  - Resumen operativo;
+  - Conciliación bancaria;
+  - Movimientos.
+- Descarga de Excel Holistor.
+
+## Holistor
+
+Ajustes incluidos:
+
+- Columna **Cód** agregada antes de **Exento / No Gravado**.
+- La columna **Cód** se completa con `584`.
+- Código neto actualizado de `524` a `506`.
+- Código de SIRCREB actualizado de `P006` a `SIRC`.
 
 ## Instalación local
 
@@ -20,30 +34,12 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Estructura
+## Deploy en Streamlit Cloud
 
-```text
-app.py
-assets/
-  logo_aie.png
-  favicon-aie.ico
-modules/
-  extraction.py
-  parsing.py
-  reports.py
-requirements.txt
-README.md
-```
+1. Subir el repositorio a GitHub.
+2. Crear una app nueva en Streamlit Cloud.
+3. Seleccionar `app.py` como archivo principal.
 
-## Notas
+---
 
-El parser está preparado para PDFs con columnas:
-
-- Fecha
-- Referencia
-- Causal
-- Concepto
-- Importe
-- Saldo
-
-Para gastos e impuestos, la app respeta el signo del PDF: los débitos negativos suman como gasto y los créditos o ajustes positivos restan.
+Herramienta para uso interno AIE San Justo.

@@ -8,6 +8,7 @@ from modules.extraction import text_from_pdf
 from modules.parsing import macro_ultimos_movimientos_extract
 from modules.reports import (
     build_operational_summary,
+    build_bank_reconciliation,
     fmt_money,
     make_excel,
     make_holistor_excel,
@@ -122,7 +123,9 @@ if not all_movs:
 
 df = pd.concat(all_movs, ignore_index=True)
 df = df.drop_duplicates(subset=["fecha", "referencia", "causal", "concepto", "importe", "saldo", "cuenta"])
-df = df.sort_values(["cuenta", "fecha", "referencia"], ascending=[True, True, True]).reset_index(drop=True)
+sort_cols = [c for c in ["cuenta", "archivo", "orden_cronologico"] if c in df.columns]
+if sort_cols:
+    df = df.sort_values(sort_cols, ascending=True).reset_index(drop=True)
 
 st.subheader("Datos detectados")
 st.write(f"**Cuentas detectadas:** {df['cuenta'].nunique()}")
@@ -145,6 +148,17 @@ col3.markdown(metric_card("Neto", neto_movimientos), unsafe_allow_html=True)
 st.subheader("Resumen operativo")
 resumen = build_operational_summary(df)
 st.dataframe(resumen[["Concepto", "Importe formateado"]], use_container_width=True, hide_index=True)
+
+st.subheader("Conciliación bancaria")
+conciliacion = build_bank_reconciliation(df)
+conc_cols = [
+    "Archivo", "Cuenta", "Desde", "Hasta", "Movimientos",
+    "Saldo anterior calculado formateado", "Créditos formateado", "Débitos formateado",
+    "Neto movimientos formateado", "Saldo final calculado formateado",
+    "Saldo final informado formateado", "Diferencia formateado", "Estado",
+]
+conc_cols = [c for c in conc_cols if c in conciliacion.columns]
+st.dataframe(conciliacion[conc_cols], use_container_width=True, hide_index=True)
 
 with st.expander("Ver movimientos detectados", expanded=False):
     df_show = df.copy()
@@ -169,9 +183,9 @@ suffix = "macro_ultimos_movimientos"
 if df["cuenta"].nunique() == 1:
     suffix = f"macro_ultimos_movimientos_{str(df['cuenta'].iloc[0]).replace('/', '-') }"
 
-excel_bytes = make_excel(df, resumen)
+excel_bytes = make_excel(df, resumen, conciliacion)
 holistor_bytes = make_holistor_excel(df)
-pdf_bytes = make_operational_summary_pdf(df, resumen, logo_path=LOGO if LOGO.exists() else None)
+pdf_bytes = make_operational_summary_pdf(df, resumen, conciliacion, logo_path=LOGO if LOGO.exists() else None)
 
 st.subheader("Descargas")
 d1, d2, d3 = st.columns(3)
